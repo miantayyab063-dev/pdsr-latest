@@ -1,0 +1,27 @@
+<?php
+declare(strict_types=1);
+require __DIR__.'/common.php';
+if(empty($_SERVER['HTTPS'])||$_SERVER['HTTPS']==='off'){http_response_code(403);exit('HTTPS required');}
+header('Cache-Control: no-store');header("Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'");header('X-Content-Type-Options: nosniff');
+session_set_cookie_params(['secure'=>true,'httponly'=>true,'samesite'=>'Strict']);ini_set('session.use_strict_mode','1');session_start();
+try {[$db,$c]=setup();}catch(Throwable $x){http_response_code(503);exit('Database unavailable');}
+$_SESSION['csrf']??=bin2hex(random_bytes(32));$msg='';
+if(isset($_SESSION['last']) && time()-$_SESSION['last']>1800)unset($_SESSION['admin']);
+if(!empty($_SESSION['admin']))$_SESSION['last']=time();
+if($_SERVER['REQUEST_METHOD']==='POST'){
+ if(!hash_equals($_SESSION['csrf'],is_string($_POST['csrf']??null)?$_POST['csrf']:'')){http_response_code(403);exit('Invalid request');}
+ $action=$_POST['action']??'';
+ if($action==='login'){
+  if(rate($db,$c,'login',5)&&password_verify((string)($_POST['password']??''),$c['admin_hash'])){session_regenerate_id(true);$_SESSION['admin']=true;$_SESSION['last']=time();$_SESSION['csrf']=bin2hex(random_bytes(32));}else $msg='Login failed or rate limited.';
+ }elseif(!empty($_SESSION['admin'])){
+  if($action==='logout'){session_destroy();header('Location: admin.php');exit;}
+  if($action==='delete'){if($n=normalize((string)($_POST['phone']??''))){$db->prepare('DELETE FROM listings WHERE phone=?')->execute([$n]);$msg='Listing removed.';}}
+  if($action==='save'){
+   $n=normalize((string)($_POST['phone']??''));$name=trim((string)($_POST['business_name']??''));$cat=trim((string)($_POST['category']??''));$web=trim((string)($_POST['website']??''));$ev=trim((string)($_POST['evidence_url']??''));
+   if(!$n||!$name||strlen($name)>150||!$cat||strlen($cat)>100||!url_ok($web)||!url_ok($ev)||($_POST['verified']??'')!=='yes')$msg='Invalid fields or missing public-listing authorization.';
+   else {$db->prepare('INSERT INTO listings(phone,business_name,category,website,evidence_url) VALUES(?,?,?,?,?) ON DUPLICATE KEY UPDATE business_name=VALUES(business_name),category=VALUES(category),website=VALUES(website),evidence_url=VALUES(evidence_url)')->execute([$n,$name,$cat,$web,$ev]);$msg='Public business listing saved.';}
+  }
+ }
+}
+$token=e($_SESSION['csrf']);$auth=!empty($_SESSION['admin']);
+?><!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PDSR LATEST Admin</title><style>body{margin:0;background:#f4f8fb;color:#0f223d;font:16px system-ui}header{padding:28px;background:#0f223d;color:#fff}header small{color:#e4b855}main{max-width:850px;margin:auto;padding:20px}section{background:white;padding:22px;border-radius:18px;margin-bottom:18px;box-shadow:0 3px 15px #dae3eb}input{box-sizing:border-box;width:100%;padding:12px;margin:7px 0 14px;border:1px solid #ccd9e2;border-radius:8px}input[type=checkbox]{width:auto}button{background:#00877e;color:white;border:0;border-radius:9px;padding:13px 22px;cursor:pointer}label{display:block}table{width:100%;border-collapse:collapse}td,th{text-align:left;padding:10px;border-bottom:1px solid #ddd;overflow-wrap:anywhere}.overflow{overflow:auto}</style><header><small>PRIVATE ADMIN WORKSPACE</small><h1>PDSR LATEST</h1>Authorized public business directory</header><main><p><?=e($msg)?></p><?php if(!$auth):?><section><h2>Admin sign in</h2><form method="post"><input type="hidden" name="csrf" value="<?=$token?>"><input type="hidden" name="action" value="login"><label>Password<input type="password" name="password" required autocomplete="current-password"></label><button>Sign in</button></form></section><?php else:?><section><h2><?=(int)$db->query('SELECT COUNT(*) FROM listings')->fetchColumn()?> public business listings</h2><form method="post"><input type="hidden" name="csrf" value="<?=$token?>"><button name="action" value="logout">Sign out</button></form></section><section><h2>Add / update verified listing</h2><p>Only official public business contact numbers. Review the evidence and permission before publishing. No private SIM-owner data.</p><form method="post"><input type="hidden" name="csrf" value="<?=$token?>"><?php foreach(['phone'=>'Public business mobile','business_name'=>'Business name','category'=>'Category','website'=>'Official HTTPS website','evidence_url'=>'Public source / authorization reference'] as $key=>$label):?><label><?=e($label)?><input name="<?=$key?>" required></label><?php endforeach;?><label><input type="checkbox" name="verified" value="yes" required> I verified authorization and that this is a public business contact.</label><button name="action" value="save">Publish listing</button></form></section><section class="overflow"><h2>Latest listings (100)</h2><table><tr><th>Number</th><th>Business</th><th>Category</th></tr><?php foreach($db->query('SELECT phone,business_name,category FROM listings ORDER BY updated_at DESC LIMIT 100') as $r):?><tr><td><?=e($r['phone'])?></td><td><?=e($r['business_name'])?></td><td><?=e($r['category'])?></td></tr><?php endforeach;?></table><form method="post"><input type="hidden" name="csrf" value="<?=$token?>"><label>Remove exact number<input name="phone" required></label><button name="action" value="delete">Remove listing</button></form></section><?php endif;?></main></html>
